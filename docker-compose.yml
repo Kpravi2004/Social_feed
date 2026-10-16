@@ -1,0 +1,98 @@
+version: "3.9"
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./frontend/dist:/usr/share/nginx/html:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+    depends_on:
+      - api-1
+      - api-2
+
+  api-1:
+    build: ./backend
+    env_file: .env
+    environment:
+      - INSTANCE_ID=api-1
+      - MONGO_URI=mongodb://mongo:27017/socialfeed
+      - REDIS_URL=redis://redis:6379
+      - KAFKA_BROKER=kafka:9092
+    depends_on:
+      - mongo
+      - redis
+      - kafka
+
+  api-2:
+    build: ./backend
+    env_file: .env
+    environment:
+      - INSTANCE_ID=api-2
+      - MONGO_URI=mongodb://mongo:27017/socialfeed
+      - REDIS_URL=redis://redis:6379
+      - KAFKA_BROKER=kafka:9092
+    depends_on:
+      - mongo
+      - redis
+      - kafka
+
+  consumer:
+    build: ./consumer
+    env_file: .env
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/socialfeed
+      - REDIS_URL=redis://redis:6379
+      - KAFKA_BROKER=kafka:9092
+    depends_on:
+      - mongo
+      - redis
+      - kafka
+
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongo_data:/data/db
+    ports:
+      - "27017:27017"
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  mongo_data:
+  redis_data:

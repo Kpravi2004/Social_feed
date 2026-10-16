@@ -1,0 +1,91 @@
+name: Build and Deploy
+
+# Runs on every push to main. Pull requests only get the build/verify
+# job — deploy only happens once code is actually merged.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    name: Build & syntax-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Catches require-chain and syntax errors before anything gets
+      # anywhere near a server — the same check used during local dev.
+      - name: Install & check backend
+        run: |
+          cd backend
+          npm install
+          find src -name "*.js" -exec node --check {} \;
+
+      - name: Install & check consumer
+        run: |
+          cd consumer
+          npm install
+          find src -name "*.js" -exec node --check {} \;
+
+      # A real Vite build catches JSX/import errors that --check can't.
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm install
+          npm run build
+
+  deploy:
+    name: Deploy to VPS
+    needs: verify
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build frontend for Nginx
+        run: |
+          cd frontend
+          npm install
+          npm run build
+
+      # Ships only what changed rather than the whole repo — node_modules
+      # and .git are excluded, and the frontend's build output replaces
+      # its source since that's what Nginx actually serves.
+      #
+      # .env and certbot/ are excluded from --delete on purpose: neither
+      # exists in the git checkout (both are gitignored), so without this
+      # exclude, --delete would wipe the VPS's real secrets and TLS certs
+      # on every single deploy.
+      - name: Sync files to VPS
+        uses: burnett01/rsync-deployments@7.0.1
+        with:
+          switches: >-
+            -avzr --delete
+            --exclude 'node_modules' --exclude '.git' --exclude 'frontend/src'
+            --exclude '.env' --exclude 'certbot'
+          path: ./
+          remote_path: ${{ secrets.VPS_DEPLOY_PATH }}
+          remote_host: ${{ secrets.VPS_HOST }}
+          remote_user: ${{ secrets.VPS_USER }}
+          remote_key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Rebuild and restart containers
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd ${{ secrets.VPS_DEPLOY_PATH }}
+            # -f explicitly targets only the production compose file —
+            # without it, Compose would also pick up docker-compose.override.yml
+            # if present and silently strip TLS from a live deployment.
+            docker compose -f docker-compose.yml build
+            docker compose -f docker-compose.yml up -d
+            docker image prune -f
